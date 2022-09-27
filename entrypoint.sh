@@ -179,7 +179,7 @@ fi
 echo ::set-output name=tag::$new
 
 # create local git tag
-git tag -am"" "$new"
+git tag --annotate --message="Automatically bumped by github-tag-action" "$new"
 
 # push new tag ref to github
 dt=$(date '+%Y-%m-%dT%H:%M:%SZ')
