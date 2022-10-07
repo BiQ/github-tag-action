@@ -6,21 +6,25 @@ set -o pipefail
 default_semvar_bump=${DEFAULT_BUMP:-minor}
 with_v=${WITH_V:-false}
 release_branches=${RELEASE_BRANCHES:-master,main}
-custom_tag=${CUSTOM_TAG}
+custom_tag=${CUSTOM_TAG:-}
 source=${SOURCE:-.}
 dryrun=${DRY_RUN:-false}
 initial_version=${INITIAL_VERSION:-0.0.0}
 tag_context=${TAG_CONTEXT:-repo}
+prerelease=${PRERELEASE:-false}
 suffix=${PRERELEASE_SUFFIX:-beta}
-verbose=${VERBOSE:-true}
-verbose=${VERBOSE:-true}
+verbose=${VERBOSE:-false}
+major_string_token=${MAJOR_STRING_TOKEN:-#major}
+minor_string_token=${MINOR_STRING_TOKEN:-#minor}
+patch_string_token=${PATCH_STRING_TOKEN:-#patch}
+none_string_token=${NONE_STRING_TOKEN:-#none}
 # since https://github.blog/2022-04-12-git-security-vulnerability-announced/ runner uses?
 git config --global --add safe.directory /github/workspace
 git config --global user.email "support@bdq.dk"
 git config --global user.name "github-tag-action"
 
 
-cd ${GITHUB_WORKSPACE}/${source}
+cd "${GITHUB_WORKSPACE}/${source}" || exit 1
 
 echo "*** CONFIGURATION ***"
 echo -e "\tDEFAULT_BUMP: ${default_semvar_bump}"
@@ -31,16 +35,32 @@ echo -e "\tSOURCE: ${source}"
 echo -e "\tDRY_RUN: ${dryrun}"
 echo -e "\tINITIAL_VERSION: ${initial_version}"
 echo -e "\tTAG_CONTEXT: ${tag_context}"
+echo -e "\tPRERELEASE: ${prerelease}"
 echo -e "\tPRERELEASE_SUFFIX: ${suffix}"
 echo -e "\tVERBOSE: ${verbose}"
+echo -e "\tMAJOR_STRING_TOKEN: ${major_string_token}"
+echo -e "\tMINOR_STRING_TOKEN: ${minor_string_token}"
+echo -e "\tPATCH_STRING_TOKEN: ${patch_string_token}"
+echo -e "\tNONE_STRING_TOKEN: ${none_string_token}"
+
+# verbose, show everything
+if $verbose
+then
+    set -x
+fi
 
 current_branch=$(git rev-parse --abbrev-ref HEAD)
 
-pre_release="true"
+pre_release="$prerelease"
 IFS=',' read -ra branch <<< "$release_branches"
 for b in "${branch[@]}"; do
-    # check if ${current_branch} is in ${release_branches}
+    # check if ${current_branch} is in ${release_branches} | exact branch match
     if [[ "$current_branch" == "$b" ]]
+    then
+        pre_release="false"
+    fi
+    # verify non specific branch names like  .* release/* if wildcard filter then =~
+    if [ "$b" != "${b//[\[\]|.? +*]/}" ] && [[ "$current_branch" =~ $b ]]
     then
         pre_release="false"
     fi
@@ -67,10 +87,9 @@ case "$tag_context" in
         exit 1;;
 esac
 
-# if there are none, start tags at INITIAL_VERSION which defaults to 0.0.0
+# if there are none, start tags at INITIAL_VERSION
 if [ -z "$tag" ]
 then
-    log=$(git log --pretty='%B' --)
     if $with_v
     then
         tag="v$initial_version"
@@ -86,12 +105,10 @@ then
             pre_tag="$initial_version"
         fi
     fi
-else
-    log=$(git log ${tag}..HEAD --pretty='%B' --)
 fi
 
 # get current commit hash for tag
-tag_commit=$(git rev-list -n 1 ${tag})
+tag_commit=$(git rev-list -n 1 "$tag")
 
 # get current commit hash
 commit=$(git rev-parse HEAD)
@@ -99,34 +116,33 @@ commit=$(git rev-parse HEAD)
 if [ "$tag_commit" == "$commit" ]
 then
     echo "No new commits since previous tag. Skipping..."
-    echo ::set-output name=tag::$tag
+    echo "::set-output name=new_tag::$tag"
+    echo "::set-output name=tag::$tag"
     exit 0
 fi
 
-# echo log if verbose is wanted
-if $verbose
-then
-  echo $log
-fi
+# get the merge commit message looking for #bumps
+log=$(git show -s --format=%s)
+echo "Last commit message: $log"
 
 case "$log" in
-    *#major* ) new=$(semver -i major ${tag}); part="major";;
-    *#minor* ) new=$(semver -i minor ${tag}); part="minor";;
-    *#patch* ) new=$(semver -i patch ${tag}); part="patch";;
-    *#none* ) 
+    *$major_string_token* ) new=$(semver -i major "$tag"); part="major";;
+    *$minor_string_token* ) new=$(semver -i minor "$tag"); part="minor";;
+    *$patch_string_token* ) new=$(semver -i patch "$tag"); part="patch";;
+    *$none_string_token* ) 
         echo "Default bump was set to none. Skipping..."
-        echo ::set-output name=new_tag::$tag
-        echo ::set-output name=tag::$tag
+        echo "::set-output name=new_tag::$tag"
+        echo "::set-output name=tag::$tag"
         exit 0;;
     * ) 
         if [ "$default_semvar_bump" == "none" ]
         then
             echo "Default bump was set to none. Skipping..."
-            echo ::set-output name=new_tag::$tag
-            echo ::set-output name=tag::$tag
+            echo "::set-output name=new_tag::$tag"
+            echo "::set-output name=tag::$tag"
             exit 0 
         else 
-            new=$(semver -i "${default_semvar_bump}" ${tag})
+            new=$(semver -i "${default_semvar_bump}" "$tag")
             part=$default_semvar_bump 
         fi 
         ;;
@@ -134,14 +150,14 @@ esac
 
 if $pre_release
 then
-    # Already a prerelease available, bump it
-    if [[ "$pre_tag" =~ "$new" ]] && [[ "$pre_tag" =~ "$suffix" ]]
+    # already a pre-release available, bump it
+    if [[ "$pre_tag" =~ $new ]] && [[ "$pre_tag" =~ $suffix ]]
     then
         if $with_v
         then
-            new="v$(semver -i prerelease ${pre_tag} --preid ${suffix})"
+            new=v$(semver -i prerelease "${pre_tag}" --preid "${suffix}")
         else
-            new="$(semver -i prerelease ${pre_tag} --preid ${suffix})"
+            new=$(semver -i prerelease "${pre_tag}" --preid "${suffix}")
         fi
         echo -e "Bumping ${suffix} pre-tag ${pre_tag}. New pre-tag ${new}"
     else
@@ -151,7 +167,7 @@ then
         else
             new="$new-$suffix.0"
         fi
-        echo -e "Setting ${suffix} pre-tag ${pre_tag}. With pre-tag ${new}"
+        echo -e "Setting ${suffix} pre-tag ${pre_tag} - With pre-tag ${new}"
     fi
     part="pre-$part"
 else
@@ -159,27 +175,26 @@ else
     then
         new="v$new"
     fi
-    echo -e "Bumping tag ${tag}. New tag ${new}"
+    echo -e "Bumping tag ${tag} - New tag ${new}"
 fi
 
 # as defined in readme if CUSTOM_TAG is used any semver calculations are irrelevant.
-if ! [ -z "$custom_tag" ]
+if [ -n "$custom_tag" ]
 then
     new="$custom_tag"
 fi
 
 # set outputs
-echo ::set-output name=new_tag::$new
-echo ::set-output name=part::$part
+echo "::set-output name=new_tag::$new"
+echo "::set-output name=part::$part"
+echo "::set-output name=tag::$new" # this needs to go in v2 is breaking change
+echo "::set-output name=old_tag::$tag"
 
-# use dry run to determine the next tag
+# dry run exit without real changes
 if $dryrun
 then
-    echo ::set-output name=tag::$tag
     exit 0
-fi 
-
-echo ::set-output name=tag::$new
+fi
 
 # create local git tag
 git tag --annotate --message="Automatically bumped by github-tag-action" "$new"
@@ -187,12 +202,12 @@ git tag --annotate --message="Automatically bumped by github-tag-action" "$new"
 # push new tag ref to github
 dt=$(date '+%Y-%m-%dT%H:%M:%SZ')
 full_name=$GITHUB_REPOSITORY
-git_refs_url=$(jq .repository.git_refs_url $GITHUB_EVENT_PATH | tr -d '"' | sed 's/{\/sha}//g')
+git_refs_url=$(jq .repository.git_refs_url "$GITHUB_EVENT_PATH" | tr -d '"' | sed 's/{\/sha}//g')
 
 echo "$dt: **pushing tag $new to repo $full_name"
 
 git_refs_response=$(
-curl -s -X POST $git_refs_url \
+curl -s -X POST "$git_refs_url" \
 -H "Authorization: token $GITHUB_TOKEN" \
 -d @- << EOF
 
@@ -208,8 +223,8 @@ git_ref_posted=$( echo "${git_refs_response}" | jq .ref | tr -d '"' )
 echo "::debug::${git_refs_response}"
 if [ "${git_ref_posted}" = "refs/tags/${new}" ]
 then
-  exit 0
+    exit 0
 else
-  echo "::error::Tag was not created properly."
-  exit 1
+    echo "::error::Tag was not created properly."
+    exit 1
 fi
